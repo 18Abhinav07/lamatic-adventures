@@ -1,48 +1,113 @@
-# DRAFT scaffold — validate node/field names in the Lamatic Flow Editor
-# before import. Built from documented patterns (docs/flows/flow-config),
-# not a fetched schema reference. See ../PLAN.md for verification notes.
+# Flow 1 — target-qa-flow (system under test)   [PLAIN LLM, no RAG]
 #
-# Flow 1: throwaway RAG Q&A flow, exists only to be called by the oracle
-# flow (flows/oracle-eval-flow.yaml) with golden-set inputs.
+# STATUS: BUILT AND VERIFIED IN STUDIO (2026-09-07).
+#   Flow ID: 4f1f1bd3-9f6d-4634-aa46-637a6726c5a5
+#   Flow Test run: input {"question":"What is the capital of France?"}
+#                  -> API Response output {"answer":"Paris."}  (all 3 nodes "Test Successful")
+#
+# This YAML is a faithful transcript of the flow's Config tab (Studio's Monaco
+# editor) after the working test. Lamatic has NO API to create flows (GraphQL is
+# execute-only), so a flow is built node-by-node in Studio; this file is the
+# reference, and edits made here only matter if pasted back into the Config tab
+# and Saved. The Config tab round-trips: pasting valid YAML there and hitting
+# Save does persist (verified — that is how question schema / user prompt /
+# outputMapping below were set).
+#
+# Real schema notes confirmed live:
+#   - misspelled key `responeType` is the real one (values: realtime | async)
+#   - trigger `advance_schema` is a JSON STRING
+#   - LLM node is `LLMNode` (menu: AI > Generate Text); prompt is a `prompts:`
+#     ARRAY of {id, role, content} — NOT promptTemplate/systemPrompt
+#   - LLM text output field is `generatedResponse`
+#   - every node carries boilerplate `modes: {}` and `allConfigs: {Config A: ...}`
+#     that mirrors `values`; `schema:` is the node's declared output shape
+#   - no keyless "bundled models": an LLM node needs a connected provider
+#     Credential. This project had ZERO connected; we added a Groq credential
+#     named `groq-1`. Groq via Lamatic exposes only gpt-oss-120b / gpt-oss-20b.
+#     Target uses gpt-oss-20b; the oracle judge uses gpt-oss-120b.
 
-name: target-qa-flow
 triggerNode:
-  nodeId: trigger-1
-  nodeType: webhookTrigger
-  nodeName: Run Target Flow
+  nodeId: triggerNode_1
+  nodeType: graphqlNode
+  nodeName: API Request
   values:
-    inputSchema:
-      question: string
+    responeType: realtime
+    advance_schema: '{"question":"string"}'
+  modes: {}
+  allConfigs:
+    Config A:
+      nodeName: API Request
+      responeType: realtime
+      advance_schema: '{"question":"string"}'
+  schema:
+    sampleOutput: string
 
 nodes:
-  - nodeId: retrieve-1
-    nodeType: RAGNode
-    nodeName: Retrieve Context
-    needs: [trigger-1]
-    values:
-      query: "{{trigger-1.question}}"
-      vectorStoreName: default
-
-  - nodeId: answer-1
+  - nodeId: LLMNode_329
     nodeType: LLMNode
-    nodeName: Generate Answer
-    needs: [retrieve-1]
+    nodeName: Generate Text
     values:
-      systemPrompt: >
-        Answer the question using only the provided context.
-        Be concise and direct.
-      promptTemplate: >
-        Context: {{retrieve-1.results}}
-        Question: {{trigger-1.question}}
-      generativeModelName:
-        provider_name: openai
-        type: generator/text
-        model_name: gpt-4o-mini
+      tools: &ref_0 []
+      prompts: &ref_1
+        - id: 187c2f4b-c23d-4545-abef-73dc897d6b7b
+          role: system
+          content: >-
+            You are a concise factual assistant. Answer in one or two sentences.
+            If you are not sure, say you are not sure. Do not add caveats or
+            pleasantries.
+        - id: 187c2f4b-c23d-4545-abef-73dc897d6b7d
+          role: user
+          content: '{{triggerNode_1.output.question}}'
+      memories: '[]'
+      messages: '[]'
+      attachments: ''
+      credentials: ''
+      generativeModelName: &ref_2
+        - type: generator/text
+          configName: configA
+          provider_name: groq
+          credential_name: groq-1
+          credentialId: 12454f6f-f877-4bb3-9921-7c4e1acfec0e
+          model_name: groq/openai/gpt-oss-20b
+          params: {}
+    modes: {}
+    needs:
+      - triggerNode_1
+    allConfigs:
+      Config A:
+        tools: *ref_0
+        prompts: *ref_1
+        memories: '[]'
+        messages: '[]'
+        nodeName: Generate Text
+        attachments: ''
+        credentials: ''
+        generativeModelName: *ref_2
+    schema:
+      generatedResponse: string
+      _meta: object
+      tool_calls: object
+      images: array
 
 responseNode:
-  nodeId: response-1
-  nodeType: responseNode
-  nodeName: Return Answer
-  needs: [answer-1]
+  nodeId: responseNode_triggerNode_1
+  nodeType: graphqlResponseNode
+  nodeName: API Response
   values:
-    output: "{{answer-1.text}}"
+    headers: '{"content-type":"application/json"}'
+    retries: '0'
+    webhookUrl: ''
+    retry_delay: '0'
+    outputMapping: '{"answer":"{{LLMNode_329.output.generatedResponse}}"}'
+  needs:
+    - LLMNode_329
+  modes: {}
+  allConfigs:
+    Config A:
+      headers: '{"content-type":"application/json"}'
+      retries: '0'
+      nodeName: API Response
+      webhookUrl: ''
+      retry_delay: '0'
+      outputMapping: '{"answer":"{{LLMNode_329.output.generatedResponse}}"}'
+  schema: {}

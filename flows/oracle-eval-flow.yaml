@@ -1,109 +1,414 @@
-# DRAFT scaffold — validate node/field names in the Lamatic Flow Editor
-# before import. Built from documented patterns (docs/flows/flow-config),
-# not a fetched schema reference. See ../PLAN.md for verification notes.
+# Flow 2 — oracle-eval-flow   [inline golden set, deterministic grader]
 #
-# Flow 3: the actual pitch. Replays a golden set through target-flow.yaml,
-# scores each output with an LLM judge, gates on average score.
+# STATUS: BUILT, DEPLOYED, AND RUN END-TO-END IN LAMATIC (2026-09-07).
+#   Flow ID: 86799705-51b6-45d7-881f-8240140eea46
+#   Project: AbhinavsOrganization694 / AbhinavsProject977
+#   Structure (canvas + Config tab in sync, all 7 nodes live):
+#     API Request (triggerNode_1, graphqlNode)
+#       -> Golden Set   (codeNode_270)     7 Q/accept pairs, literal
+#       -> Loop         (forLoopNode_193)  iterates codeNode_270.output.pairs
+#            -> Case Input   (codeNode_050)  exposes currentValue.{input,accept}
+#            -> Execute Flow (flowNode_379)  calls target-qa-flow with the question
+#            -> Grade Case   (codeNode_500)  normalize + pipe-split + substring match
+#       -> Loop End     (forLoopEndNode_711)
+#       -> Aggregate    (codeNode_600)     pass count vs threshold, per-case table
+#       -> API Response (responseNode_triggerNode_1, graphqlResponseNode)
+#
+#   VERIFIED RUN (GraphQL execute API, threshold=4):
+#     query ExecuteWorkflow($workflowId: String!, $threshold: Int) {
+#       executeWorkflow(workflowId: $workflowId, payload: { threshold: $threshold }) { result status }
+#     }
+#     -> status "success", result:
+#        { pass: true, passed: 7, failed: 0, total: 7, pass_rate: 1,
+#          threshold: 4, regressions: [], per_case_results: [ 7 rows with
+#          real question / accept / got / pass ] }
+#     All 7 golden answers matched the target flow's output
+#     (Paris->paris, 12x12->144, Shakespeare, Au, seven continents,
+#      Mars, WW2->1945). See flows/DEMO-PROOF.md for the full JSON.
+#
+# Lamatic has NO create-flow API (GraphQL is execute-only: executeWorkflow /
+# checkStatus, introspection disabled, WorkflowResponse needs { result status }).
+# A flow is built node-by-node in Studio; this file is the reference transcript
+# of the Config tab YAML (paste into Config -> Save -> Deploy).
+#
+# SCHEMA NOTES CONFIRMED LIVE (correcting earlier drafts):
+#   - codeNode: assign to the pre-declared `output` variable. NOT `return {...}`.
+#   - codeNode reference resolution (verified with a _debug dump node):
+#       * BARE splice  {{nodeId.output.field}}  IS resolved -> the JSON value is
+#         spliced in literally. Safe idiom for maybe-undefined refs:
+#             const x = [{{ref}}][0] || {};
+#         (valid JS whether the splice yields `[{...}][0]`, `[][0]`, or nothing)
+#       * BACKTICK-wrapped `{{nodeId.output.field}}` is NOT dereferenced -- it
+#         becomes the literal path string "workflow.nodeId.output.field".
+#         (This was the v1/v2 bug: Grade Case read backtick refs and got path
+#         strings instead of values. v3 below uses bare splices only.)
+#       * Refs more than one level past `.output` do NOT resolve
+#         ({{forLoopNode_193.output.currentValue.input}} fails) -- hence the
+#         Case Input node that re-exposes the fields one level down.
+#   - flowNode.values.requestInput is a STRING; a {{...}} inside it DOES render
+#     at execution time (target flow received the real questions).
+#   - forLoopEndNode.output.loopOutput is an ARRAY; each element is keyed by
+#     nodeId: { codeNode_050:{...}, flowNode_379:{...}, codeNode_500:{output:{
+#     question, accept, got, pass}, ...} }. Aggregate unwraps r.codeNode_500.output.
+#   - trigger threshold: [{{triggerNode_1.output}}][0].threshold == the Int payload.
+#   - forLoopNode.values: iterateOver ("list"|"range"), iteratorValue (STRING
+#     template), endValue ("10"), increment ("1"), wait (0), connectedTo.
+#     connections: "Loop Start" conditionEdge -> first body node (codeNode_050),
+#     "Loop" loopEdge -> forLoopEndNode.
+#   - forLoopEndNode.values: {connectedTo: <forLoopNodeId>}; needs = [<last body
+#     node>, <forLoopNodeId>]; connections: "Loop" loopEdge back to forLoopNode.
+#   - every node carries `modes: {}` and `allConfigs: {Config A: <mirror of values>}`.
+#   - trigger key is the misspelled `responeType` (realtime | async).
+#   - Pasting a complete Config YAML into the Monaco editor syncs ALL nodes onto
+#     the canvas (including brand-new ones); Save flips the badge to "Pending
+#     Deployments"; Deploy (Deploy button -> Deploy Project dialog, oracle-eval-flow
+#     + target-qa-flow checked -> Deploy) publishes to the edge. Studio then
+#     re-serializes the YAML canonically (reorders keys within values/allConfigs).
+#
+# MODEL PROVIDER FINDING:
+#   This project had ZERO model providers connected. A Groq credential named
+#   `groq-1` (credentialId 12454f6f-f877-4bb3-9921-7c4e1acfec0e) was added. Groq
+#   via Lamatic exposes only gpt-oss-120b / gpt-oss-20b. target-qa-flow's LLM
+#   node uses groq/openai/gpt-oss-20b.
+#
+# GRADER DESIGN — deterministic, not an LLM judge:
+#   Golden answers are exact, unambiguous facts. normalize (lowercase, strip
+#   non-alphanumeric to spaces, collapse whitespace) + pipe-split the accept
+#   string + substring match, in a codeNode. More reliable than an
+#   InstructorLLMNode judge and removes a second model dependency. The LLM-judge
+#   variant is kept as a design note (see bottom) but is NOT on the demo path.
 
-name: oracle-eval-flow
 triggerNode:
-  nodeId: trigger-1
-  nodeType: webhookTrigger
-  nodeName: Run Eval
+  nodeId: triggerNode_1
+  nodeType: graphqlNode
+  nodeName: API Request
   values:
-    inputSchema:
-      threshold: number # e.g. 4, pass/fail cutoff on a 1-5 scale
+    advance_schema: '{"threshold":"number"}'   # how many of N cases must pass
+    responeType: realtime
+  modes: {}
+  allConfigs:
+    Config A:
+      nodeName: API Request
+      advance_schema: '{"threshold":"number"}'
+      responeType: realtime
+  schema:
+    sampleOutput: string
 
 nodes:
-  - nodeId: fetch-golden-1
-    nodeType: memoryRetrieveNode
-    nodeName: Fetch Golden Set
-    needs: [trigger-1]
+  # 1) Golden set as a literal. `accept` is a pipe-joined set of acceptable
+  #    normalized substrings so "seven" or "7" both pass, etc.
+  - nodeId: codeNode_270
+    nodeType: codeNode
+    nodeName: Golden Set
     values:
-      collection: golden-set-target-flow
+      code: |-
+        output = {
+          pairs: [
+            { input: "What is the capital of France?", accept: "paris" },
+            { input: "What is 12 times 12?", accept: "144" },
+            { input: "Who wrote the play Romeo and Juliet?", accept: "shakespeare" },
+            { input: "What is the chemical symbol for the element gold?", accept: "au" },
+            { input: "How many continents are there on Earth?", accept: "seven|7" },
+            { input: "Which planet is known as the Red Planet?", accept: "mars" },
+            { input: "In what year did World War 2 end?", accept: "1945" }
+          ]
+        };
+    modes: {}
+    needs:
+      - triggerNode_1
+    allConfigs:
+      Config A:
+        nodeName: Golden Set
+        code: |-
+          output = {
+            pairs: [
+              { input: "What is the capital of France?", accept: "paris" },
+              { input: "What is 12 times 12?", accept: "144" },
+              { input: "Who wrote the play Romeo and Juliet?", accept: "shakespeare" },
+              { input: "What is the chemical symbol for the element gold?", accept: "au" },
+              { input: "How many continents are there on Earth?", accept: "seven|7" },
+              { input: "Which planet is known as the Red Planet?", accept: "mars" },
+              { input: "In what year did World War 2 end?", accept: "1945" }
+            ]
+          };
+    schema: {}
 
-  - nodeId: loop-1
-    nodeType: loopNode
-    nodeName: Iterate Golden Pairs
-    needs: [fetch-golden-1]
+  # 1b) Loop body, node 1: re-expose the current pair's fields one level below
+  #     `.output` so downstream nodes can reference them (refs two levels past
+  #     `.output` do not resolve).
+  - nodeId: codeNode_050
+    nodeType: codeNode
+    nodeName: Case Input
     values:
-      list: "{{fetch-golden-1.records}}"
-      itemVar: pair
+      code: |-
+        const cv = [{{forLoopNode_193.output.currentValue}}][0] || {};
+        output = {
+          question: String(cv.input == null ? "" : cv.input),
+          accept: String(cv.accept == null ? "" : cv.accept)
+        };
+    modes: {}
+    needs:
+      - forLoopNode_193
+    allConfigs:
+      Config A:
+        nodeName: Case Input
+        code: |-
+          const cv = [{{forLoopNode_193.output.currentValue}}][0] || {};
+          output = {
+            question: String(cv.input == null ? "" : cv.input),
+            accept: String(cv.accept == null ? "" : cv.accept)
+          };
+    schema: {}
 
-  - nodeId: run-target-1
-    nodeType: executeFlowNode
-    nodeName: Run Target Flow
-    needs: [loop-1]
+  # 1c) Loop body, node 2: call the target flow with the golden question.
+  #     The {{...}} inside requestInput renders at execution time.
+  - nodeId: flowNode_379
+    nodeType: flowNode
+    nodeName: Execute Flow
     values:
-      flowName: target-qa-flow
-      input:
-        question: "{{loop-1.pair.input}}"
+      flowId: 4f1f1bd3-9f6d-4634-aa46-637a6726c5a5   # target-qa-flow
+      requestInput: '{"question":"{{codeNode_050.output.question}}"}'
+    modes: {}
+    needs:
+      - codeNode_050
+    allConfigs:
+      Config A:
+        nodeName: Execute Flow
+        flowId: 4f1f1bd3-9f6d-4634-aa46-637a6726c5a5
+        requestInput: '{"question":"{{codeNode_050.output.question}}"}'
+    schema:
+      flowOutput: object
 
-  - nodeId: judge-1
-    nodeType: LLMNode
-    nodeName: Judge Output
-    needs: [run-target-1]
+  # 1d) Loop body, node 3: deterministic grader. Bare splices only (backtick
+  #     refs resolve to path strings, not values).
+  - nodeId: codeNode_500
+    nodeType: codeNode
+    nodeName: Grade Case
     values:
-      systemPrompt: >
-        You are a strict grader. Compare expected_output to actual_output.
-        Score correctness and tone on a 1-5 scale. Be consistent and terse.
-      promptTemplate: >
-        Expected: {{loop-1.pair.expected_output}}
-        Actual: {{run-target-1.output}}
-        Return a score 1-5 and one-sentence reasoning.
-      generativeModelName:
-        provider_name: openai
-        type: generator/text
-        model_name: gpt-4o-mini
+      code: |-
+        const cv = [{{codeNode_050.output}}][0] || {};
+        const flowOut = [{{flowNode_379.output.flowOutput}}][0] || {};
+        const input = String(cv && cv.question != null ? cv.question : "");
+        const acceptRaw = String(cv && cv.accept != null ? cv.accept : "");
+        let gotRaw = "";
+        if (flowOut && typeof flowOut === "object") {
+          gotRaw = flowOut.answer != null ? flowOut.answer
+                 : flowOut.result != null ? flowOut.result
+                 : flowOut.text != null ? flowOut.text
+                 : "";
+        } else if (typeof flowOut === "string") {
+          gotRaw = flowOut;
+        }
+        const got = typeof gotRaw === "string" ? gotRaw : JSON.stringify(gotRaw);
+        const norm = (s) => String(s == null ? "" : s).toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+        const g = norm(got);
+        const accept = acceptRaw.split("|").map(norm).filter(Boolean);
+        const pass = accept.some((a) => a && g.indexOf(a) !== -1);
+        output = { question: input, accept: acceptRaw, got: got, pass: pass };
+    modes: {}
+    needs:
+      - flowNode_379
+    allConfigs:
+      Config A:
+        nodeName: Grade Case
+        code: |-
+          const cv = [{{codeNode_050.output}}][0] || {};
+          const flowOut = [{{flowNode_379.output.flowOutput}}][0] || {};
+          const input = String(cv && cv.question != null ? cv.question : "");
+          const acceptRaw = String(cv && cv.accept != null ? cv.accept : "");
+          let gotRaw = "";
+          if (flowOut && typeof flowOut === "object") {
+            gotRaw = flowOut.answer != null ? flowOut.answer
+                   : flowOut.result != null ? flowOut.result
+                   : flowOut.text != null ? flowOut.text
+                   : "";
+          } else if (typeof flowOut === "string") {
+            gotRaw = flowOut;
+          }
+          const got = typeof gotRaw === "string" ? gotRaw : JSON.stringify(gotRaw);
+          const norm = (s) => String(s == null ? "" : s).toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+          const g = norm(got);
+          const accept = acceptRaw.split("|").map(norm).filter(Boolean);
+          const pass = accept.some((a) => a && g.indexOf(a) !== -1);
+          output = { question: input, accept: acceptRaw, got: got, pass: pass };
+    schema: {}
 
-  - nodeId: judge-json-1
-    nodeType: GenerateJSONNode
-    nodeName: Structure Judge Output
-    needs: [judge-1]
+  # 1e) close the loop
+  - nodeId: forLoopEndNode_711
+    nodeType: forLoopEndNode
+    nodeName: Loop End
     values:
-      schema:
-        score: number
-        reasoning: string
-      source: "{{judge-1.text}}"
+      connectedTo: forLoopNode_193
+    modes: {}
+    needs:
+      - codeNode_500
+      - forLoopNode_193
+    allConfigs:
+      Config A:
+        nodeName: Loop End
+        connectedTo: forLoopNode_193
+    schema:
+      loopOutput: object
+    connections:
+      - condition: Loop
+        value: forLoopNode_193
+        type: loopEdge
+        invisible: true
 
-  - nodeId: accumulate-1
-    nodeType: variableNode
-    nodeName: Accumulate Scores
-    needs: [judge-json-1]
+  # 2) Loop over each golden pair. `iteratorValue` is a STRING template that
+  #    resolves to the pairs array. Studio lists forLoopEndNode BEFORE
+  #    forLoopNode in `nodes:` — kept that order here.
+  - nodeId: forLoopNode_193
+    nodeType: forLoopNode
+    nodeName: Loop
     values:
-      name: results
-      operation: append
-      value:
-        input: "{{loop-1.pair.input}}"
-        expected: "{{loop-1.pair.expected_output}}"
-        actual: "{{run-target-1.output}}"
-        score: "{{judge-json-1.score}}"
-        reasoning: "{{judge-json-1.reasoning}}"
+      iterateOver: list
+      iteratorValue: '{{codeNode_270.output.pairs}}'
+      endValue: '10'
+      increment: '1'
+      wait: 0
+      connectedTo: forLoopEndNode_711
+    modes: {}
+    needs:
+      - codeNode_270
+      - forLoopEndNode_711
+    allConfigs:
+      Config A:
+        nodeName: Loop
+        iterateOver: list
+        iteratorValue: '{{codeNode_270.output.pairs}}'
+        endValue: '10'
+        increment: '1'
+        wait: 0
+        connectedTo: forLoopEndNode_711
+    schema:
+      currentValue: object
+      intermediateOutput: object
+      previousIterationOutput: object
+    connections:
+      - condition: Loop Start
+        value: codeNode_050
+        type: conditionEdge
+        invisible: true
+      - condition: Loop
+        value: forLoopEndNode_711
+        type: loopEdge
+        invisible: false
 
-  - nodeId: average-1
-    nodeType: variableNode
-    nodeName: Compute Average Score
-    needs: [accumulate-1] # after loop completes
+  # 3) Aggregate + gate (after the loop). loopOutput is an array; each element
+  #    is keyed by nodeId, so unwrap it.codeNode_500.output.
+  - nodeId: codeNode_600
+    nodeType: codeNode
+    nodeName: Aggregate
     values:
-      name: average_score
-      operation: average
-      source: "{{accumulate-1.results[*].score}}"
-
-  - nodeId: gate-1
-    nodeType: conditionNode
-    nodeName: Pass/Fail Gate
-    needs: [average-1]
-    values:
-      condition: "{{average-1.average_score}} >= {{trigger-1.threshold}}"
+      code: |-
+        const raw = [{{forLoopEndNode_711.output.loopOutput}}][0];
+        const trig = [{{triggerNode_1.output}}][0] || {};
+        let threshold = Number(trig.threshold);
+        if (!threshold || isNaN(threshold)) threshold = Number(`{{triggerNode_1.output.threshold}}`);
+        if (!threshold || isNaN(threshold)) threshold = 1;
+        let items = [];
+        if (Array.isArray(raw)) items = raw;
+        else if (raw && Array.isArray(raw.output)) items = raw.output;
+        else if (raw && typeof raw === "object") items = Object.values(raw);
+        const results = items.map((it) => {
+          let r = it;
+          if (r && r.codeNode_500 && r.codeNode_500.output) r = r.codeNode_500.output;
+          else if (r && r.output && r.output.pass !== undefined) r = r.output;
+          return {
+            question: (r && r.question) || "",
+            accept: (r && r.accept) || "",
+            got: (r && r.got) || "",
+            pass: !!(r && r.pass)
+          };
+        });
+        const total = results.length;
+        const passed = results.filter((r) => r.pass).length;
+        const failed = total - passed;
+        const regressions = results.filter((r) => !r.pass).map((r) => r.question);
+        output = {
+          pass: passed >= threshold,
+          threshold: threshold,
+          total: total,
+          passed: passed,
+          failed: failed,
+          pass_rate: total ? Math.round((passed / total) * 100) / 100 : 0,
+          regressions: regressions,
+          per_case_results: results
+        };
+    modes: {}
+    needs:
+      - forLoopEndNode_711
+    allConfigs:
+      Config A:
+        nodeName: Aggregate
+        code: |-
+          const raw = [{{forLoopEndNode_711.output.loopOutput}}][0];
+          const trig = [{{triggerNode_1.output}}][0] || {};
+          let threshold = Number(trig.threshold);
+          if (!threshold || isNaN(threshold)) threshold = Number(`{{triggerNode_1.output.threshold}}`);
+          if (!threshold || isNaN(threshold)) threshold = 1;
+          let items = [];
+          if (Array.isArray(raw)) items = raw;
+          else if (raw && Array.isArray(raw.output)) items = raw.output;
+          else if (raw && typeof raw === "object") items = Object.values(raw);
+          const results = items.map((it) => {
+            let r = it;
+            if (r && r.codeNode_500 && r.codeNode_500.output) r = r.codeNode_500.output;
+            else if (r && r.output && r.output.pass !== undefined) r = r.output;
+            return {
+              question: (r && r.question) || "",
+              accept: (r && r.accept) || "",
+              got: (r && r.got) || "",
+              pass: !!(r && r.pass)
+            };
+          });
+          const total = results.length;
+          const passed = results.filter((r) => r.pass).length;
+          const failed = total - passed;
+          const regressions = results.filter((r) => !r.pass).map((r) => r.question);
+          output = {
+            pass: passed >= threshold,
+            threshold: threshold,
+            total: total,
+            passed: passed,
+            failed: failed,
+            pass_rate: total ? Math.round((passed / total) * 100) / 100 : 0,
+            regressions: regressions,
+            per_case_results: results
+          };
+    schema: {}
 
 responseNode:
-  nodeId: response-1
-  nodeType: responseNode
-  nodeName: Return Eval Summary
-  needs: [gate-1]
+  nodeId: responseNode_triggerNode_1
+  nodeType: graphqlResponseNode
+  nodeName: API Response
   values:
-    output:
-      pass: "{{gate-1.result}}"
-      average_score: "{{average-1.average_score}}"
-      per_case_results: "{{accumulate-1.results}}"
-      regressions: "{{accumulate-1.results[?score < trigger-1.threshold]}}"
+    outputMapping: '{"pass":"{{codeNode_600.output.pass}}","passed":"{{codeNode_600.output.passed}}","failed":"{{codeNode_600.output.failed}}","total":"{{codeNode_600.output.total}}","pass_rate":"{{codeNode_600.output.pass_rate}}","threshold":"{{codeNode_600.output.threshold}}","regressions":"{{codeNode_600.output.regressions}}","per_case_results":"{{codeNode_600.output.per_case_results}}"}'
+    webhookUrl: ''
+    headers: '{"content-type":"application/json"}'
+    retries: '0'
+    retry_delay: '0'
+  needs:
+    - codeNode_600
+  modes: {}
+  allConfigs:
+    Config A:
+      nodeName: API Response
+      outputMapping: '{"pass":"{{codeNode_600.output.pass}}","passed":"{{codeNode_600.output.passed}}","failed":"{{codeNode_600.output.failed}}","total":"{{codeNode_600.output.total}}","pass_rate":"{{codeNode_600.output.pass_rate}}","threshold":"{{codeNode_600.output.threshold}}","regressions":"{{codeNode_600.output.regressions}}","per_case_results":"{{codeNode_600.output.per_case_results}}"}'
+      webhookUrl: ''
+      headers: '{"content-type":"application/json"}'
+      retries: '0'
+      retry_delay: '0'
+  schema: {}
+
+# ---------------------------------------------------------------------------
+# ALTERNATIVE: LLM judge (NOT on the demo path — design note only)
+#
+# Replace codeNode_500 "Grade Case" with an InstructorLLMNode that returns
+# {score: number 1-5, reasoning: string}, comparing the golden expected answer
+# against {{flowNode_379.output.flowOutput.answer}} using
+# groq/openai/gpt-oss-120b. Then codeNode_600 gates on average score >=
+# threshold instead of a pass count. Right design when golden answers are
+# open-ended (summaries, explanations) rather than exact facts; for this demo
+# the deterministic grader is more reliable and has one less model dependency.
