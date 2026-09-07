@@ -1,0 +1,109 @@
+# DRAFT scaffold — validate node/field names in the Lamatic Flow Editor
+# before import. Built from documented patterns (docs/flows/flow-config),
+# not a fetched schema reference. See ../PLAN.md for verification notes.
+#
+# Flow 3: the actual pitch. Replays a golden set through target-flow.yaml,
+# scores each output with an LLM judge, gates on average score.
+
+name: oracle-eval-flow
+triggerNode:
+  nodeId: trigger-1
+  nodeType: webhookTrigger
+  nodeName: Run Eval
+  values:
+    inputSchema:
+      threshold: number # e.g. 4, pass/fail cutoff on a 1-5 scale
+
+nodes:
+  - nodeId: fetch-golden-1
+    nodeType: memoryRetrieveNode
+    nodeName: Fetch Golden Set
+    needs: [trigger-1]
+    values:
+      collection: golden-set-target-flow
+
+  - nodeId: loop-1
+    nodeType: loopNode
+    nodeName: Iterate Golden Pairs
+    needs: [fetch-golden-1]
+    values:
+      list: "{{fetch-golden-1.records}}"
+      itemVar: pair
+
+  - nodeId: run-target-1
+    nodeType: executeFlowNode
+    nodeName: Run Target Flow
+    needs: [loop-1]
+    values:
+      flowName: target-qa-flow
+      input:
+        question: "{{loop-1.pair.input}}"
+
+  - nodeId: judge-1
+    nodeType: LLMNode
+    nodeName: Judge Output
+    needs: [run-target-1]
+    values:
+      systemPrompt: >
+        You are a strict grader. Compare expected_output to actual_output.
+        Score correctness and tone on a 1-5 scale. Be consistent and terse.
+      promptTemplate: >
+        Expected: {{loop-1.pair.expected_output}}
+        Actual: {{run-target-1.output}}
+        Return a score 1-5 and one-sentence reasoning.
+      generativeModelName:
+        provider_name: openai
+        type: generator/text
+        model_name: gpt-4o-mini
+
+  - nodeId: judge-json-1
+    nodeType: GenerateJSONNode
+    nodeName: Structure Judge Output
+    needs: [judge-1]
+    values:
+      schema:
+        score: number
+        reasoning: string
+      source: "{{judge-1.text}}"
+
+  - nodeId: accumulate-1
+    nodeType: variableNode
+    nodeName: Accumulate Scores
+    needs: [judge-json-1]
+    values:
+      name: results
+      operation: append
+      value:
+        input: "{{loop-1.pair.input}}"
+        expected: "{{loop-1.pair.expected_output}}"
+        actual: "{{run-target-1.output}}"
+        score: "{{judge-json-1.score}}"
+        reasoning: "{{judge-json-1.reasoning}}"
+
+  - nodeId: average-1
+    nodeType: variableNode
+    nodeName: Compute Average Score
+    needs: [accumulate-1] # after loop completes
+    values:
+      name: average_score
+      operation: average
+      source: "{{accumulate-1.results[*].score}}"
+
+  - nodeId: gate-1
+    nodeType: conditionNode
+    nodeName: Pass/Fail Gate
+    needs: [average-1]
+    values:
+      condition: "{{average-1.average_score}} >= {{trigger-1.threshold}}"
+
+responseNode:
+  nodeId: response-1
+  nodeType: responseNode
+  nodeName: Return Eval Summary
+  needs: [gate-1]
+  values:
+    output:
+      pass: "{{gate-1.result}}"
+      average_score: "{{average-1.average_score}}"
+      per_case_results: "{{accumulate-1.results}}"
+      regressions: "{{accumulate-1.results[?score < trigger-1.threshold]}}"

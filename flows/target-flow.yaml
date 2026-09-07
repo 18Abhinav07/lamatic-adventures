@@ -1,0 +1,48 @@
+# DRAFT scaffold — validate node/field names in the Lamatic Flow Editor
+# before import. Built from documented patterns (docs/flows/flow-config),
+# not a fetched schema reference. See ../PLAN.md for verification notes.
+#
+# Flow 1: throwaway RAG Q&A flow, exists only to be called by the oracle
+# flow (flows/oracle-eval-flow.yaml) with golden-set inputs.
+
+name: target-qa-flow
+triggerNode:
+  nodeId: trigger-1
+  nodeType: webhookTrigger
+  nodeName: Run Target Flow
+  values:
+    inputSchema:
+      question: string
+
+nodes:
+  - nodeId: retrieve-1
+    nodeType: RAGNode
+    nodeName: Retrieve Context
+    needs: [trigger-1]
+    values:
+      query: "{{trigger-1.question}}"
+      vectorStoreName: default
+
+  - nodeId: answer-1
+    nodeType: LLMNode
+    nodeName: Generate Answer
+    needs: [retrieve-1]
+    values:
+      systemPrompt: >
+        Answer the question using only the provided context.
+        Be concise and direct.
+      promptTemplate: >
+        Context: {{retrieve-1.results}}
+        Question: {{trigger-1.question}}
+      generativeModelName:
+        provider_name: openai
+        type: generator/text
+        model_name: gpt-4o-mini
+
+responseNode:
+  nodeId: response-1
+  nodeType: responseNode
+  nodeName: Return Answer
+  needs: [answer-1]
+  values:
+    output: "{{answer-1.text}}"

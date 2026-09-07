@@ -1,0 +1,36 @@
+# DRAFT scaffold — validate node/field names in the Lamatic Flow Editor
+# before import. See ../PLAN.md for verification notes.
+#
+# Flow 2: one-off flow to seed 5-10 golden {input, expected_output} pairs
+# into the Memory Store collection the oracle flow reads from. Run once
+# per pair, or extend with a Loop Node over an inline list if preferred.
+
+name: seed-golden-set-flow
+triggerNode:
+  nodeId: trigger-1
+  nodeType: webhookTrigger
+  nodeName: Seed One Pair
+  values:
+    inputSchema:
+      input: string
+      expected_output: string
+
+nodes:
+  - nodeId: store-1
+    nodeType: memoryAddNode
+    nodeName: Store Golden Pair
+    needs: [trigger-1]
+    values:
+      collection: golden-set-target-flow
+      record:
+        input: "{{trigger-1.input}}"
+        expected_output: "{{trigger-1.expected_output}}"
+
+responseNode:
+  nodeId: response-1
+  nodeType: responseNode
+  nodeName: Confirm Stored
+  needs: [store-1]
+  values:
+    output:
+      stored: true
