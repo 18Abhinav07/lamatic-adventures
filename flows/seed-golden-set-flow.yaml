@@ -1,36 +1,70 @@
-# DRAFT scaffold — validate node/field names in the Lamatic Flow Editor
-# before import. See ../PLAN.md for verification notes.
+# Flow — seed-golden-set-flow   [NOT ON THE DEMO PATH — NOT BUILT]
 #
-# Flow 2: one-off flow to seed 5-10 golden {input, expected_output} pairs
-# into the Memory Store collection the oracle flow reads from. Run once
-# per pair, or extend with a Loop Node over an inline list if preferred.
+# The inline-JSON golden set was chosen (see oracle-eval-flow.yaml,
+# codeNode_270 "Golden Set"), so this flow is NOT built for the demo. Kept only
+# as the "productionize the golden set into Memory Store" reference.
+#
+# The demo itself is complete: oracle-eval-flow + target-qa-flow are built,
+# deployed, and verified end-to-end (7/7 pass). See flows/DEMO-PROOF.md. This
+# file was never round-tripped through Studio and is a schema sketch only.
+#
+# STATUS: schema-aligned against a live docs read (2026-09-07), not round-tripped
+# through Studio. Run once per golden pair (call the flow N times), or wrap the
+# Memory Add node in a forLoopNode over an inline array to seed all pairs in one
+# run.
+#
+# Confirmed from docs:
+#   Memory Add -> nodeType: memoryNode, values: uniqueId, sessionId, memoryValue
+#                 (array of {role, content}), memoryCollection, embeddingModelName,
+#                 generativeModelName. output: memoryActions, extractedFacts
+#
+# IMPORTANT CAVEAT: Lamatic's Memory Store is conversational memory — it embeds
+# entries and derives "extractedFacts". It does not guarantee byte-exact readback
+# of what you stored. For a regression oracle you want the expected_output
+# verbatim. Two options:
+#   (A) Use Memory Store anyway (this file). Simple, matches the "golden set lives
+#       in a store" model. Verify on retrieval that expected_output survives intact.
+#   (B) RELIABILITY HEDGE (the chosen path): skip this flow. Inline the golden set
+#       as a JSON array literal in oracle-eval-flow (a Variable/Code node), so
+#       there is no store round-trip to fail. See ../PLAN.md.
 
-name: seed-golden-set-flow
 triggerNode:
-  nodeId: trigger-1
-  nodeType: webhookTrigger
-  nodeName: Seed One Pair
+  nodeId: triggerNode_1
+  nodeType: graphqlNode
+  nodeName: API Request
   values:
-    inputSchema:
-      input: string
-      expected_output: string
+    advance_schema: '{"pair_id": "string", "input": "string", "expected_output": "string"}'
+    responeType: realtime   # misspelled key is the real one (confirmed from runtime dump)
 
 nodes:
-  - nodeId: store-1
-    nodeType: memoryAddNode
+  - nodeId: memoryNode_1
+    nodeType: memoryNode
     nodeName: Store Golden Pair
-    needs: [trigger-1]
+    needs:
+      - triggerNode_1
     values:
-      collection: golden-set-target-flow
-      record:
-        input: "{{trigger-1.input}}"
-        expected_output: "{{trigger-1.expected_output}}"
+      uniqueId: "{{triggerNode_1.output.pair_id}}"
+      sessionId: ""
+      memoryCollection: golden-set-target-flow
+      memoryValue:
+        - role: user
+          content: "{{triggerNode_1.output.input}}"
+        - role: assistant
+          content: "{{triggerNode_1.output.expected_output}}"
+      embeddingModelName:
+        type: embedder/text
+        provider_name: openai
+        model_name: default        # <-- your connected embedding model/credential
+      generativeModelName:
+        type: generator/text
+        provider_name: openai
+        model_name: default        # <-- your connected generative model/credential
 
 responseNode:
-  nodeId: response-1
-  nodeType: responseNode
-  nodeName: Confirm Stored
-  needs: [store-1]
+  nodeId: responseNode_triggerNode_1
+  nodeType: graphqlResponseNode
+  nodeName: API Response
+  needs:
+    - memoryNode_1
   values:
-    output:
-      stored: true
+    outputMapping: '{"stored": true, "pair_id": "{{triggerNode_1.output.pair_id}}"}'
